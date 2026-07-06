@@ -536,6 +536,19 @@ function wire() {
 
 async function boot() {
   wire();
+  if (location.search.includes("layout-debug")) {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:fixed;bottom:0;left:0;background:#000;color:#0f0;" +
+      "font:11px monospace;z-index:99;padding:2px 5px;pointer-events:none";
+    setInterval(() => {
+      const tr = document.querySelector(".topbar-right");
+      probe.textContent =
+        `doc ${document.documentElement.scrollWidth}w inner ${innerWidth}w ` +
+        `topbar ${$("topbar").offsetWidth} right ${tr.offsetWidth}@${tr.offsetLeft} ` +
+        `ng ${$("new-game-btn").offsetWidth}@${$("new-game-btn").offsetLeft}`;
+    }, 400);
+    document.body.appendChild(probe);
+  }
   const m = await api.meta();
   meta = m.data;
   if (meta.defaults) {

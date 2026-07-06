@@ -117,6 +117,9 @@ export class Animator {
     el.style.visibility = "hidden";
     this.fx.appendChild(ghost);
     const D = this.dur(380);
+    // Safety net: never strand a ghost (or a hidden card) if the animation's
+    // finished promise fails to settle.
+    setTimeout(() => { el.style.visibility = ""; ghost.remove(); }, D + delay + 1500);
     try {
       const lift = ghost.animate(
         [
@@ -148,6 +151,7 @@ export class Animator {
   async flyOut(exit, targetRect, delay = 0) {
     const ghost = this.makeGhostFromInfo(exit);
     this.fx.appendChild(ghost);
+    setTimeout(() => ghost.remove(), this.dur(400) + delay + 1500);
     const from = exit.rect;
     let frames;
     if (targetRect) {
