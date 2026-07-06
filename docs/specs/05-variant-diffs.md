@@ -34,7 +34,7 @@ Verified against pagat.com (Buraco, Burraco, Canasta, Biriba, Rummy — links at
 | `going_out.require_canastra` | True | True | **False** | True |
 | `going_out.require_clean_canastra` | False | False | — | False |
 | `going_out.require_morto_taken` | True | **False** | **False** | True (biribaki) |
-| `going_out.discard_to_go_out` | REQUIRED | **OPTIONAL** | **OPTIONAL** | REQUIRED |
+| `going_out.discard_to_go_out` | OPTIONAL (D19; schema default stays REQUIRED) | OPTIONAL | OPTIONAL | **REQUIRED** |
 | `going_out.go_out_bonus` | 100 | 100 | **0** | 100 |
 | `going_out.concealed_bonus` | 0 | **100** (200 total) | 0 | 0 |
 | `going_out.go_out_min_canastas` | 1 | 1 (4p) / **2 (2p)** | 0 | 1 |

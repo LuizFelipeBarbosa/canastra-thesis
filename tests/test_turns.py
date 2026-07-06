@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from buraco.cards import Rank, Suit
-from buraco.config import DISCARD_OUT_OPTIONAL, DRAW_TOP_CARD
+from buraco.config import DISCARD_OUT_OPTIONAL, DISCARD_OUT_REQUIRED, DRAW_TOP_CARD
 from buraco.engine.actions import (
     Add,
     CreateSeq,
@@ -94,7 +94,9 @@ def test_scenario4_bater_same_turn_as_morto():
 
 
 def test_scenario5_meld_out_blocked_when_discard_required():
-    state = make_state(hands=[H456, [C10]], melds=canastra_melds())
+    cfg = replace(CFG, going_out=replace(CFG.going_out, discard_to_go_out=DISCARD_OUT_REQUIRED))
+    state = make_state(cfg=cfg, hands=[H456, [C10]],
+                       melds=[natural_run(cfg, Suit.SPADES, 3, 7)])
     with pytest.raises(IllegalAction):
         apply_action(state, CreateSeq(Suit.HEARTS, 4, SEQ_WILD_NONE))
     acts = legal_actions(state)

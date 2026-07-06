@@ -9,8 +9,8 @@ player choice.
 2. **Batida indireta.** Side's morto untaken; player melds down to 1 card, discards it → hand 0 via DISCARD. **Expect:** take morto (hand→11), **turn ends immediately**; not a bater.
 3. **Bater by discard.** Morto already taken, side has a canastra; player melds to 1 card and discards last. **Expect:** round ends, `end_reason=BATER`, +100 to side.
 4. **Bater same turn morto was taken.** Batida direta (scenario 1) gives 11 new cards; player then melds all 11 (side has a canastra) and discards last. **Expect:** legal — morto taken earlier this turn satisfies `require_morto_taken`; round ends, +100.
-5. **Meld-out attempt with morto taken, default REQUIRED.** Morto taken, canastra present; player tries to MELD/ADD away their last card (no discard left). **Expect:** action **illegal** (`discard_to_go_out=REQUIRED`); must keep a card to discard.
-6. **Meld-out bater, OPTIONAL profile.** Same as 5 but `discard_to_go_out=OPTIONAL`. **Expect:** GO_OUT legal; round ends, +100.
+5. **Meld-out attempt with morto taken, REQUIRED policy.** Morto taken, canastra present; player tries to MELD/ADD away their last card (no discard left). **Expect:** action **illegal** (`discard_to_go_out=REQUIRED` — schema default; the buraco profile is OPTIONAL since D19, so tests set REQUIRED explicitly); must keep a card to discard.
+6. **Meld-out bater, OPTIONAL policy (buraco profile default since D19).** Same as 5 but `discard_to_go_out=OPTIONAL`. **Expect:** GO_OUT legal; round ends, +100.
 7. **Deck exhaustion, one morto untaken, END_ROUND.** Stock empty, pile empty at a player's DRAW; side X never took its morto. **Expect:** END_ROUND is the only legal action; side X gets −100 (untaken penalty); every side subtracts remaining hand value.
 8. **Deck exhaustion, CONVERT_MORTO profile.** Stock empties at DRAW, side X's morto untaken. **Expect:** morto X becomes the new stock, `morto_taken[X]` stays False, play continues; round does not end here.
 9. **Cannot empty by drawing.** Player holds 1 card, DRAW phase, takes a 20-card pile → hand 21. **Expect:** no morto pickup, no bater; drawing never triggers the emptying resolver.
