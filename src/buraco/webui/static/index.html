@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buraco — mesa</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="wordmark">BURACO<span id="profile-tag"></span></div>
+    <div id="placar" aria-live="polite"></div>
+    <div class="topbar-right">
+      <label class="speed" title="Animation speed">
+        <input id="speed" type="range" min="0" max="3" step="1" value="1">
+        <span id="speed-label">1×</span>
+      </label>
+      <button id="skip-btn" class="ghost-btn" hidden>Skip to my turn</button>
+      <button id="moves-btn" class="ghost-btn" hidden>All moves</button>
+      <button id="new-game-btn" class="ghost-btn">New game</button>
+    </div>
+  </header>
+
+  <main id="table" hidden>
+    <section id="seat-top" class="seat-area"></section>
+    <div id="flank">
+      <section id="seat-left" class="seat-area seat-side" hidden></section>
+      <div id="table-mid">
+        <section id="opp-melds" class="meld-shelf"></section>
+        <section id="center-strip">
+          <div id="deck-zone" class="pile-zone"></div>
+          <div id="morto-zone" class="pile-zone"></div>
+          <div id="trash-zone"></div>
+          <div id="canasta-signals"></div>
+        </section>
+        <section id="own-melds" class="meld-shelf"></section>
+      </div>
+      <section id="seat-right" class="seat-area seat-side" hidden></section>
+    </div>
+    <section id="action-bar">
+      <div id="phase-banner"></div>
+      <div id="action-buttons"></div>
+    </section>
+    <section id="hand-zone"></section>
+    <aside id="ticker"></aside>
+  </main>
+
+  <section id="setup" hidden></section>
+  <div id="meld-tray" class="popover" hidden></div>
+  <div id="all-moves" class="popover" hidden></div>
+  <div id="modal-root" hidden></div>
+  <div id="fx-layer" aria-hidden="true"></div>
+  <div id="toast" role="status"></div>
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
