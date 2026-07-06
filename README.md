@@ -19,6 +19,8 @@ uv run python examples/play_cli.py --human 0             # play seat 0 yourself
 uv run python examples/play_cli.py --players 4           # two teams of two
 uv run python examples/run_random_games.py --games 1000  # batch simulations
 uv run python examples/selfplay_skeleton.py              # RL loop shape
+uv sync --group rl                                       # + PyTorch (PPO trainer)
+uv run buraco-train --updates 200 --run-dir runs/ppo-2p  # PPO self-play training
 ```
 
 ## Playing: terminal or browser
@@ -78,6 +80,33 @@ payoffs = env.get_payoffs()               # per-seat zero-sum payoffs at episode
   `buraco.env.env.replay(cfg, seed, log)` rebuilds it bit-for-bit. Export/verify
   logs with `run_random_games.py --save-logs / --replay`.
 
+## Training: PPO self-play (`buraco.rl`)
+
+PyTorch lives only in the optional `rl` dependency group — the engine and env
+stay numpy-only. Install with `uv sync --group rl`.
+
+```bash
+uv run buraco-train --profile buraco --players 2 --updates 200 \
+    --run-dir runs/ppo-2p --seed 0 --device cpu     # or: python -m buraco.rl.train
+uv run buraco-eval --checkpoint runs/ppo-2p/checkpoints/latest.pt \
+    --opponent heuristic --games 200                # or: python -m buraco.rl.evaluate
+uv run buraco-train --resume runs/ppo-2p/checkpoints/latest.pt --updates 400 \
+    --run-dir runs/ppo-2p                           # continue a run
+```
+
+One shared policy/value MLP drives every seat (observations are
+perspective-relative, so 2p and 4p share the same network and checkpoints).
+Rollouts run N envs in lockstep with one batched forward per decision;
+per-seat trajectories get the terminal zero-sum payoff from `get_payoffs()`
+and per-trajectory GAE (`gamma=1.0` — reward is terminal-only within a round).
+Each run directory holds `config.json` (exact train + rules config),
+`metrics.csv` / `eval.csv` (thesis-figure-ready), and atomic checkpoints that
+carry the optimizer, RNG states, and the observation layout, so `--resume` is
+deterministic on CPU and a checkpoint can never be applied to a permuted
+feature order. Fixed-seed evals side-swap the learned agent every other game
+against the random and heuristic baselines. `--device cpu` outruns MPS at
+this batch size (~2.3k vs ~1.4k steps/s on an M-series laptop).
+
 ## Default Buraco rules (the house profile)
 
 - 2 players head-to-head or 4 players in two teams of two (partners opposite).
@@ -133,6 +162,9 @@ src/buraco/
   env/                    # RL layer (numpy lives here only)
     env.py observations.py encoding.py
   agents/                 # random + heuristic baselines
+  rl/                     # PPO self-play trainer (torch; optional dep group)
+    obs.py buffer.py      #   numpy-only: canonical flattening, GAE
+    nets.py ppo.py rollout.py agent.py evaluate.py train.py checkpoint.py
   describe.py             # human-readable action labels (CLI + GUI)
   webui/                  # browser GUI: session/views/events + stdlib server
     session.py views.py events.py server.py static/

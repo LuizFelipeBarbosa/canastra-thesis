@@ -13,6 +13,8 @@ dependencies = [
 
 [project.scripts]
 buraco-gui = "buraco.webui.__main__:main"
+buraco-train = "buraco.rl.train:main"
+buraco-eval = "buraco.rl.evaluate:main"
 
 [build-system]
 requires = ["uv_build>=0.9.29,<0.10.0"]
@@ -23,6 +25,9 @@ dev = [
     "hypothesis>=6.156.1",
     "pytest>=9.1.1",
     "ruff>=0.15.20",
+]
+rl = [
+    "torch>=2.8",
 ]
 
 [tool.ruff]
