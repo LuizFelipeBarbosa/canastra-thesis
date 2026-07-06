@@ -55,8 +55,24 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def _existing_run_artifacts(run_dir: Path) -> list[str]:
+    found = [name for name in ("metrics.csv", "eval.csv") if (run_dir / name).exists()]
+    checkpoints = run_dir / "checkpoints"
+    if checkpoints.is_dir() and any(checkpoints.iterdir()):
+        found.append("checkpoints/")
+    return found
+
+
 class Trainer:
     def __init__(self, cfg: TrainConfig, run_dir: Path, resume: Path | None = None):
+        if resume is None and (existing := _existing_run_artifacts(run_dir)):
+            # A fresh run would append to the old CSVs and overwrite checkpoints.
+            raise SystemExit(
+                f"refusing fresh run: {run_dir} already contains "
+                f"{', '.join(existing)}; continue it with "
+                f"--resume {run_dir / 'checkpoints' / 'latest.pt'} "
+                "or pick a new --run-dir"
+            )
         ckpt = load_checkpoint(resume) if resume else None
         if ckpt is not None:
             # The checkpoint defines the run (profile/players/net/seed/...);

@@ -76,6 +76,35 @@ def test_resume_infers_run_config_from_checkpoint(tmp_path):
     assert [int(r["update"]) for r in _rows(run_dir / "metrics.csv")] == [0, 1, 2]
 
 
+def test_fresh_run_refused_in_used_directory(tmp_path):
+    """A non-resume run must not append to or overwrite an existing run."""
+    run_dir = tmp_path / "run"
+    Trainer(TINY, run_dir).run()
+    metrics_before = (run_dir / "metrics.csv").read_bytes()
+    latest = run_dir / "checkpoints" / "latest.pt"
+    ckpt_before = latest.read_bytes()
+
+    with pytest.raises(SystemExit, match="refusing fresh run"):
+        Trainer(TINY, run_dir)
+
+    # Nothing was written or modified by the refused attempt.
+    assert (run_dir / "metrics.csv").read_bytes() == metrics_before
+    assert latest.read_bytes() == ckpt_before
+    # Resume into the same directory still works.
+    Trainer(
+        TrainConfig(**{**TINY.to_dict(), "updates": 3}), run_dir, resume=latest
+    ).run()
+    assert [int(r["update"]) for r in _rows(run_dir / "metrics.csv")] == [0, 1, 2]
+
+
+def test_fresh_run_allowed_in_new_or_empty_directory(tmp_path):
+    Trainer(TINY, tmp_path / "brand-new").run()  # dir does not exist yet
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    Trainer(TINY, empty).run()  # dir exists but holds no run artifacts
+    assert (empty / "metrics.csv").exists()
+
+
 def test_resolve_run_dir_reuses_checkpoint_run(tmp_path):
     """--resume without --run-dir must append to the original run (Codex review P2)."""
     ckpt = tmp_path / "myrun" / "checkpoints" / "latest.pt"
