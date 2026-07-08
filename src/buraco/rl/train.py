@@ -91,7 +91,7 @@ class Trainer:
         cfg: TrainConfig,
         run_dir: Path,
         resume: Path | None = None,
-        mixture_overrides: dict | None = None,
+        resume_overrides: dict | None = None,
     ):
         if resume is None and (existing := _existing_run_artifacts(run_dir)):
             # A fresh run would append to the old CSVs and overwrite checkpoints.
@@ -105,14 +105,15 @@ class Trainer:
         if ckpt is not None:
             # The checkpoint defines the run (profile/players/net/seed/...);
             # only per-invocation knobs come from the CLI. Explicitly passed
-            # pool flags also override, so a self-play checkpoint can be
-            # fine-tuned against an opponent mixture.
+            # pool flags and --num-envs also override, so a self-play
+            # checkpoint can be fine-tuned against an opponent mixture on a
+            # different env topology.
             cfg = replace(
                 ckpt.train_config,
                 updates=cfg.updates,
                 device=cfg.device,
                 num_workers=cfg.num_workers,
-                **(mixture_overrides or {}),
+                **(resume_overrides or {}),
             )
         self.cfg = cfg
         self.run_dir = run_dir
@@ -352,7 +353,9 @@ def main() -> None:
     parser.add_argument("--profile", default=defaults.profile)
     parser.add_argument("--players", type=int, default=defaults.players)
     parser.add_argument("--updates", type=int, default=defaults.updates)
-    parser.add_argument("--num-envs", type=int, default=defaults.num_envs)
+    # default=None marks "not passed" so resume can fall back to the
+    # checkpoint's env topology (see the pool flags below for the pattern).
+    parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument("--min-steps", type=int, default=defaults.min_steps_per_update)
     parser.add_argument("--lr", type=float, default=defaults.lr)
     parser.add_argument("--hidden", type=int, default=defaults.hidden)
@@ -373,9 +376,10 @@ def main() -> None:
     parser.add_argument("--pool-size", type=int, default=None)
     args = parser.parse_args()
 
-    mixture_overrides = {
+    resume_overrides = {
         name: value
         for name, value in (
+            ("num_envs", args.num_envs),
             ("opp_heuristic", args.opp_heuristic),
             ("opp_pool", args.opp_pool),
             ("pool_every", args.pool_every),
@@ -386,7 +390,7 @@ def main() -> None:
     cfg = TrainConfig(
         profile=args.profile,
         players=args.players,
-        num_envs=args.num_envs,
+        num_envs=args.num_envs if args.num_envs is not None else defaults.num_envs,
         min_steps_per_update=args.min_steps,
         updates=args.updates,
         lr=args.lr,
@@ -398,11 +402,11 @@ def main() -> None:
         device=args.device,
         num_workers=args.num_workers,
         seed=args.seed,
-        **mixture_overrides,
+        **{k: v for k, v in resume_overrides.items() if k != "num_envs"},
     )
     resume = Path(args.resume) if args.resume else None
     run_dir = resolve_run_dir(args.run_dir, resume, cfg)
-    trainer = Trainer(cfg, run_dir, resume=resume, mixture_overrides=mixture_overrides)
+    trainer = Trainer(cfg, run_dir, resume=resume, resume_overrides=resume_overrides)
     try:
         trainer.run()
     finally:

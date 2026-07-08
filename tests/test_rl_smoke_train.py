@@ -211,10 +211,12 @@ def test_mixture_overrides_enable_fine_tune_of_plain_checkpoint(tmp_path):
         TrainConfig(updates=3, device="cpu"),
         mix_dir,
         resume=v1_dir / "checkpoints" / "latest.pt",
-        mixture_overrides={"opp_heuristic": 1.0, "pool_every": 0},
+        resume_overrides={"opp_heuristic": 1.0, "pool_every": 0, "num_envs": 4},
     )
     assert tuned.cfg.opp_heuristic == 1.0
     assert tuned.cfg.opp_pool == 0.0  # not overridden; checkpoint default kept
+    assert tuned.cfg.num_envs == 4  # env topology is resume-overridable
+    assert tuned.cfg.hidden == TINY.hidden  # everything else: checkpoint wins
     tuned.run()
     rows = _rows(mix_dir / "metrics.csv")
     assert [int(r["update"]) for r in rows] == [2]
