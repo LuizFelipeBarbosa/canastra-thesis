@@ -58,6 +58,8 @@ EVAL_FIELDS = [
 
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
         return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     return torch.device(name)
 
