@@ -28,6 +28,9 @@ class Checkpoint:
     rules_config: dict[str, Any]
     obs_spec: ObsSpec
     rng: dict[str, Any]
+    # Opponent-pool member file names (resolved against <run_dir>/pool/ on
+    # resume); None for checkpoints written before the pool existed.
+    pool_manifest: list[str] | None = None
 
 
 def save_checkpoint(
@@ -43,6 +46,7 @@ def save_checkpoint(
     episode_counter: int,
     *,
     episode_counters: list[int] | None = None,
+    pool_manifest: list[str] | None = None,
 ) -> None:
     # The legacy scalar "episode_counter" is always written so older readers
     # keep working; a parallel pool additionally records its per-slot counters.
@@ -65,6 +69,8 @@ def save_checkpoint(
         "obs_spec": obs_spec.to_dict(),
         "rng": rng,
     }
+    if pool_manifest is not None:
+        payload["pool_manifest"] = list(pool_manifest)
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)
@@ -82,6 +88,7 @@ def load_checkpoint(path: Path, map_location: str = "cpu") -> Checkpoint:
         rules_config=payload["rules_config"],
         obs_spec=ObsSpec.from_dict(payload["obs_spec"]),
         rng=payload["rng"],
+        pool_manifest=payload.get("pool_manifest"),
     )
 
 

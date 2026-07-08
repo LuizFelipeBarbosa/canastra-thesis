@@ -32,6 +32,13 @@ class TrainConfig:
     history_len: int = 8
     trash_top_k: int = 8
     num_workers: int = 0  # 0 = in-process collection; N = process pool of N collectors
+    # Opponent mixture: per-episode probability that the non-learner side is
+    # played by frozen opponents instead of the current policy. Remaining mass
+    # stays plain self-play. Both zero = exact v1 self-play behavior.
+    opp_heuristic: float = 0.0  # scripted HeuristicAgent opponents
+    opp_pool: float = 0.0  # frozen past-checkpoint opponents
+    pool_every: int = 500  # snapshot cadence (updates) for the opponent pool
+    pool_size: int = 10  # max pool members kept; oldest evicted
 
     def to_dict(self) -> dict:
         return asdict(self)

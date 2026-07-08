@@ -4,6 +4,17 @@
         --updates 200 --run-dir runs/ppo-2p --seed 0 --device cpu
 
 Resume: --resume runs/ppo-2p/checkpoints/latest.pt (appends to the same CSVs).
+
+Opponent mixture (V2a): --opp-heuristic / --opp-pool seat frozen opponents on
+the non-learner side for that fraction of episodes (see rl/pool.py). On resume
+these four pool flags override the checkpoint config when passed explicitly,
+so a plain self-play checkpoint can be fine-tuned against a mixture:
+
+    ... --resume runs/ppo-4p/checkpoints/latest.pt --run-dir runs/ppo-4p-mix \
+        --opp-heuristic 0.25 --opp-pool 0.25
+
+Prefer a fresh --run-dir when enabling the mixture on an old run: the mixture
+adds metrics.csv columns, and appending wider rows to a v1 CSV misaligns it.
 """
 
 from __future__ import annotations
@@ -41,6 +52,7 @@ from buraco.rl.metrics import CsvLogger
 from buraco.rl.nets import PolicyValueNet
 from buraco.rl.obs import ObsSpec
 from buraco.rl.parallel import ParallelCollector
+from buraco.rl.pool import OpponentMixture, PoolManager
 from buraco.rl.ppo import ppo_update
 from buraco.rl.rollout import SelfPlayCollector
 
@@ -50,6 +62,7 @@ METRIC_FIELDS = [
     "entropy", "approx_kl", "clip_frac", "grad_norm", "epochs_run",
     "steps_per_sec", "wall_s",
 ]
+MIXTURE_FIELDS = ["recorded_steps", "mixed_episodes", "mixed_win_rate"]
 EVAL_FIELDS = [
     "update", "opponent", "games", "win_rate", "draw_rate", "mean_payoff",
     "mean_steps", "truncation_rate",
@@ -66,14 +79,20 @@ def resolve_device(name: str) -> torch.device:
 
 def _existing_run_artifacts(run_dir: Path) -> list[str]:
     found = [name for name in ("metrics.csv", "eval.csv") if (run_dir / name).exists()]
-    checkpoints = run_dir / "checkpoints"
-    if checkpoints.is_dir() and any(checkpoints.iterdir()):
-        found.append("checkpoints/")
+    for sub in ("checkpoints", "pool"):
+        if (run_dir / sub).is_dir() and any((run_dir / sub).iterdir()):
+            found.append(f"{sub}/")
     return found
 
 
 class Trainer:
-    def __init__(self, cfg: TrainConfig, run_dir: Path, resume: Path | None = None):
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        run_dir: Path,
+        resume: Path | None = None,
+        mixture_overrides: dict | None = None,
+    ):
         if resume is None and (existing := _existing_run_artifacts(run_dir)):
             # A fresh run would append to the old CSVs and overwrite checkpoints.
             raise SystemExit(
@@ -85,16 +104,23 @@ class Trainer:
         ckpt = load_checkpoint(resume) if resume else None
         if ckpt is not None:
             # The checkpoint defines the run (profile/players/net/seed/...);
-            # only per-invocation knobs come from the CLI.
+            # only per-invocation knobs come from the CLI. Explicitly passed
+            # pool flags also override, so a self-play checkpoint can be
+            # fine-tuned against an opponent mixture.
             cfg = replace(
                 ckpt.train_config,
                 updates=cfg.updates,
                 device=cfg.device,
                 num_workers=cfg.num_workers,
+                **(mixture_overrides or {}),
             )
         self.cfg = cfg
         self.run_dir = run_dir
         self.device = resolve_device(cfg.device)
+        try:
+            self.mixture = OpponentMixture(cfg.opp_heuristic, cfg.opp_pool)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         self.rules_cfg = load_profile(cfg.profile, num_players=cfg.players)
         if ckpt is not None and config_to_dict(self.rules_cfg) != ckpt.rules_config:
             raise SystemExit(
@@ -129,6 +155,8 @@ class Trainer:
                 layers=cfg.layers,
                 history_len=cfg.history_len,
                 trash_top_k=cfg.trash_top_k,
+                p_heuristic=cfg.opp_heuristic,
+                p_pool=cfg.opp_pool,
             )
         else:
             self.collector = SelfPlayCollector(
@@ -138,6 +166,7 @@ class Trainer:
                 seed=cfg.seed,
                 history_len=cfg.history_len,
                 trash_top_k=cfg.trash_top_k,
+                mixture=self.mixture,
             )
         self.net = PolicyValueNet(
             self.spec.flat_dim,
@@ -165,6 +194,20 @@ class Trainer:
                 assert isinstance(counters, int)
                 self.collector.episode_counter = counters
 
+        self.pool = (
+            PoolManager(run_dir / "pool", cfg.pool_size, cfg.pool_every)
+            if cfg.opp_pool > 0
+            else None
+        )
+        if self.pool is not None:
+            if ckpt is not None and ckpt.pool_manifest:
+                self.pool.restore(ckpt.pool_manifest)
+            if not self.pool.names:
+                # Seed with the starting policy so pool episodes exist from the
+                # first update (fresh runs and v1-checkpoint fine-tunes alike).
+                self.pool.snapshot(self.start_update, self.net)
+            self.collector.set_pool_manifest(self.pool.paths)
+
         (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         (run_dir / "config.json").write_text(
             json.dumps(
@@ -172,13 +215,16 @@ class Trainer:
                 indent=2,
             )
         )
-        self.metrics = CsvLogger(run_dir / "metrics.csv", METRIC_FIELDS)
+        metric_fields = METRIC_FIELDS + (MIXTURE_FIELDS if self.mixture.enabled else [])
+        self.metrics = CsvLogger(run_dir / "metrics.csv", metric_fields)
         self.evals = CsvLogger(run_dir / "eval.csv", EVAL_FIELDS)
 
     def run(self) -> None:
         cfg = self.cfg
         for update in range(self.start_update, cfg.updates):
             start = time.perf_counter()
+            if self.pool is not None and self.pool.maybe_snapshot(update, self.net):
+                self.collector.set_pool_manifest(self.pool.paths)
             trajs, roll = self.collector.collect(
                 self.net, self.device, cfg.min_steps_per_update
             )
@@ -207,6 +253,11 @@ class Trainer:
                     "epochs_run": ppo.epochs_run,
                     "steps_per_sec": round(roll.steps_per_sec, 1),
                     "wall_s": round(wall, 2),
+                    "recorded_steps": roll.recorded_steps,
+                    "mixed_episodes": roll.mixed_episodes,
+                    "mixed_win_rate": round(roll.mixed_wins / roll.mixed_episodes, 4)
+                    if roll.mixed_episodes
+                    else "",
                 }
             )
             print(
@@ -263,14 +314,21 @@ class Trainer:
             self.collector.episode_counter,
         )
         counters = getattr(self.collector, "counters", None)
+        manifest = self.pool.names if self.pool is not None else None
         save_checkpoint(
             self.run_dir / "checkpoints" / f"ckpt_{update:06d}.pt",
             *args,
             episode_counters=counters,
+            pool_manifest=manifest,
         )
         save_checkpoint(
-            self.run_dir / "checkpoints" / "latest.pt", *args, episode_counters=counters
+            self.run_dir / "checkpoints" / "latest.pt",
+            *args,
+            episode_counters=counters,
+            pool_manifest=manifest,
         )
+        if self.pool is not None:
+            self.pool.flush_evictions()
 
     def close(self) -> None:
         close = getattr(self.collector, "close", None)
@@ -307,8 +365,24 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--resume", default=None)
+    # default=None marks "not passed": on resume these fall back to the
+    # checkpoint config instead of silently disabling a pool run's mixture.
+    parser.add_argument("--opp-heuristic", type=float, default=None)
+    parser.add_argument("--opp-pool", type=float, default=None)
+    parser.add_argument("--pool-every", type=int, default=None)
+    parser.add_argument("--pool-size", type=int, default=None)
     args = parser.parse_args()
 
+    mixture_overrides = {
+        name: value
+        for name, value in (
+            ("opp_heuristic", args.opp_heuristic),
+            ("opp_pool", args.opp_pool),
+            ("pool_every", args.pool_every),
+            ("pool_size", args.pool_size),
+        )
+        if value is not None
+    }
     cfg = TrainConfig(
         profile=args.profile,
         players=args.players,
@@ -324,10 +398,11 @@ def main() -> None:
         device=args.device,
         num_workers=args.num_workers,
         seed=args.seed,
+        **mixture_overrides,
     )
     resume = Path(args.resume) if args.resume else None
     run_dir = resolve_run_dir(args.run_dir, resume, cfg)
-    trainer = Trainer(cfg, run_dir, resume=resume)
+    trainer = Trainer(cfg, run_dir, resume=resume, mixture_overrides=mixture_overrides)
     try:
         trainer.run()
     finally:

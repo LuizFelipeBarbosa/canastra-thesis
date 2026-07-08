@@ -172,6 +172,63 @@ def test_fresh_run_allowed_in_new_or_empty_directory(tmp_path):
     assert (empty / "metrics.csv").exists()
 
 
+def test_smoke_train_with_mixture_and_resume(tmp_path):
+    """Pool run end-to-end: snapshots, mixture metrics, manifest resume."""
+    run_dir = tmp_path / "run-mix"
+    cfg = TrainConfig(
+        **{**TINY.to_dict(), "opp_heuristic": 0.3, "opp_pool": 0.3,
+           "pool_every": 1, "pool_size": 2}
+    )
+    Trainer(cfg, run_dir).run()
+
+    rows = _rows(run_dir / "metrics.csv")
+    assert len(rows) == 2
+    for row in rows:
+        assert int(row["recorded_steps"]) <= int(row["env_steps"])
+    members = sorted(p.name for p in (run_dir / "pool").iterdir())
+    assert 1 <= len(members) <= 2
+
+    # Plain resume (no flags) keeps the checkpoint's mixture and manifest.
+    resumed = Trainer(
+        TrainConfig(updates=3, device="cpu"),
+        run_dir,
+        resume=run_dir / "checkpoints" / "latest.pt",
+    )
+    assert resumed.cfg.opp_heuristic == 0.3
+    assert resumed.cfg.opp_pool == 0.3
+    assert resumed.pool is not None and resumed.pool.names
+    resumed.run()
+    assert [int(r["update"]) for r in _rows(run_dir / "metrics.csv")] == [0, 1, 2]
+
+
+def test_mixture_overrides_enable_fine_tune_of_plain_checkpoint(tmp_path):
+    """A v1 self-play checkpoint resumes into a mixture run in a new dir."""
+    v1_dir = tmp_path / "run-v1"
+    Trainer(TINY, v1_dir).run()
+
+    mix_dir = tmp_path / "run-mix"
+    tuned = Trainer(
+        TrainConfig(updates=3, device="cpu"),
+        mix_dir,
+        resume=v1_dir / "checkpoints" / "latest.pt",
+        mixture_overrides={"opp_heuristic": 1.0, "pool_every": 0},
+    )
+    assert tuned.cfg.opp_heuristic == 1.0
+    assert tuned.cfg.opp_pool == 0.0  # not overridden; checkpoint default kept
+    tuned.run()
+    rows = _rows(mix_dir / "metrics.csv")
+    assert [int(r["update"]) for r in rows] == [2]
+    assert rows[0]["mixed_episodes"] != ""
+    assert int(rows[0]["recorded_steps"]) < int(rows[0]["env_steps"])
+
+
+def test_trainer_rejects_invalid_mixture(tmp_path):
+    bad = TrainConfig(**{**TINY.to_dict(), "opp_heuristic": 0.8, "opp_pool": 0.8})
+    with pytest.raises(SystemExit, match="sum to <= 1"):
+        Trainer(bad, tmp_path / "run-bad-mix")
+    assert not (tmp_path / "run-bad-mix").exists()
+
+
 def test_resolve_run_dir_reuses_checkpoint_run(tmp_path):
     """--resume without --run-dir must append to the original run (Codex review P2)."""
     ckpt = tmp_path / "myrun" / "checkpoints" / "latest.pt"
