@@ -144,17 +144,76 @@ def pos_allowed(cfg: RulesConfig, pos: int) -> bool:
     return True
 
 
+# --- precomputed hot-path tables ----------------------------------------------
+# Static tables are generated from the defining formulas at import time; the
+# per-config bundle is memoized on the frozen RulesConfig instance (which is
+# unhashable — card_points is a dict — so lru_cache is not an option). All
+# contents are produced by the original expressions, so they cannot drift.
+
+_SEQ_POSITIONS: tuple[tuple[int, int, int] | None, ...] = (None,) + tuple(
+    (s, s + 1, s + 2) for s in range(POS_MIN, POS_MAX - 1)
+)
+_SEQ_NATS: tuple[tuple[tuple[CardId, CardId, CardId] | None, ...], ...] = tuple(
+    (None,) + tuple(
+        (nat(s, suit), nat(s + 1, suit), nat(s + 2, suit))
+        for s in range(POS_MIN, POS_MAX - 1)
+    )
+    for suit in range(4)
+)
+_TWO_OF_SUIT: tuple[CardId, ...] = tuple(card_id(Rank.TWO, s) for s in Suit)
+_OTHER_SUITS: tuple[tuple[Suit, ...], ...] = tuple(
+    tuple(o for o in Suit if o != s) for s in Suit  # ascending (SPEC 02 §2.7)
+)
+_SET_NATS: tuple[tuple[CardId, ...], ...] = tuple(
+    tuple(card_id(r, s) for s in Suit) for r in Rank  # lowest suit first
+)
+
+
+@dataclass
+class _CfgTables:
+    wild: tuple[bool, ...]  # is_wild_card(ct) for ct 0..53
+    natural_ok: tuple[tuple[bool | None, ...], ...]  # [suit][pos]: nat card counts as NATURAL
+    pos_ok: tuple[bool, ...]  # pos_allowed(pos) for pos 0..15
+    seq_start_ok: tuple[bool, ...]  # all three positions allowed, start 1..12
+    seq_enabled: bool
+    set_enabled: bool
+    two_is_wild: bool
+
+
+def _cfg_tables(cfg: RulesConfig) -> _CfgTables:
+    tables = cfg.__dict__.get("_meld_tables")
+    if tables is None:
+        tables = _CfgTables(
+            wild=tuple(cfg.is_wild_card(ct) for ct in range(54)),
+            natural_ok=tuple(
+                (None,) + tuple(
+                    not cfg.is_wild_card(nat(p, s)) or cfg.wildcard.natural_two_in_suit
+                    for p in range(POS_MIN, POS_MAX + 1)
+                )
+                for s in range(4)
+            ),
+            pos_ok=tuple(pos_allowed(cfg, p) for p in range(POS_MAX + 2)),
+            seq_start_ok=(False,) + tuple(
+                all(pos_allowed(cfg, q) for q in (s, s + 1, s + 2))
+                for s in range(POS_MIN, POS_MAX - 1)
+            ),
+            seq_enabled=cfg.meld.allow_sequences and cfg.meld.min_meld_size <= 3,
+            set_enabled=cfg.meld.allow_sets and cfg.meld.min_meld_size <= 3,
+            two_is_wild=Rank.TWO in cfg.wildcard.wild_ranks,
+        )
+        object.__setattr__(cfg, "_meld_tables", tables)
+    return tables
+
+
 def is_natural_at(cfg: RulesConfig, ct: CardId, pos: int, suit: Suit) -> bool:
     """Whether ``ct`` fills sequence position ``pos`` in ``suit`` as a NATURAL.
 
     A wild-rank card is natural only in its own suit's own-rank position and
     only when the profile grants the natural-2 exception (SPEC 01 §4).
     """
-    if ct != nat(pos, suit):
-        return False
-    if not cfg.is_wild_card(ct):
-        return True
-    return cfg.wildcard.natural_two_in_suit
+    # nat() raises ValueError for out-of-range pos, as before; natural_ok folds
+    # the wildness/natural-2 rule for the position's own natural card.
+    return ct == nat(pos, suit) and _cfg_tables(cfg).natural_ok[suit][pos]
 
 
 # --- plans (pure legality + canonical resolution) -----------------------------
@@ -194,20 +253,18 @@ def _seq_wild_card(
             return JOKER
         return None
     if wild_choice == SEQ_WILD_TWO_OF_SUIT:
-        ct = card_id(Rank.TWO, suit)
-        if Rank.TWO in cfg.wildcard.wild_ranks and hand.get(ct, 0) > 0:
+        ct = _TWO_OF_SUIT[suit]
+        if _cfg_tables(cfg).two_is_wild and hand.get(ct, 0) > 0:
             # At its own natural position it would not act as a wild.
             if is_natural_at(cfg, ct, gap_pos, suit):
                 return None
             return ct
         return None
     if wild_choice == SEQ_WILD_OFF_SUIT_TWO:
-        if Rank.TWO not in cfg.wildcard.wild_ranks:
+        if not _cfg_tables(cfg).two_is_wild:
             return None
-        for other in Suit:  # lowest suit index first (SPEC 02 §2.7)
-            if other == suit:
-                continue
-            ct = card_id(Rank.TWO, other)
+        for other in _OTHER_SUITS[suit]:  # lowest suit index first (SPEC 02 §2.7)
+            ct = _TWO_OF_SUIT[other]
             if hand.get(ct, 0) > 0:
                 return ct
         return None
@@ -222,22 +279,25 @@ def plan_sequence(
     wild_choice: int,
 ) -> CreatePlan | None:
     """Minimum-size (3) sequence creation, SPEC 02 §2.6."""
-    if not cfg.meld.allow_sequences or cfg.meld.min_meld_size > 3:
+    tables = _cfg_tables(cfg)
+    if not tables.seq_enabled:
         return None
-    positions = (start_pos, start_pos + 1, start_pos + 2)
-    if start_pos < POS_MIN or positions[-1] > POS_MAX:
+    if start_pos < POS_MIN or start_pos + 2 > POS_MAX:
         return None
-    if not all(pos_allowed(cfg, p) for p in positions):
+    if not tables.seq_start_ok[start_pos]:
         return None
+    positions = _SEQ_POSITIONS[start_pos]
+    nats = _SEQ_NATS[suit][start_pos]
+    natural_ok = tables.natural_ok[suit]
 
-    held = [p for p in positions if hand.get(nat(p, suit), 0) > 0
-            and is_natural_at(cfg, nat(p, suit), p, suit)]
+    held = [p for i, p in enumerate(positions)
+            if hand.get(nats[i], 0) > 0 and natural_ok[p]]
 
     if wild_choice == SEQ_WILD_NONE:
         if len(held) != 3:
             return None
-        slots = tuple((nat(p, suit), SlotRole.NATURAL) for p in positions)
-        return CreatePlan(consumed=tuple(c for c, _ in slots), slots=slots)
+        slots = tuple((c, SlotRole.NATURAL) for c in nats)
+        return CreatePlan(consumed=nats, slots=slots)
 
     if len(held) != 2:
         return None
@@ -246,8 +306,8 @@ def plan_sequence(
     if wild_ct is None:
         return None
     slots = tuple(
-        (wild_ct, SlotRole.WILD) if p == gap else (nat(p, suit), SlotRole.NATURAL)
-        for p in positions
+        (wild_ct, SlotRole.WILD) if p == gap else (nats[i], SlotRole.NATURAL)
+        for i, p in enumerate(positions)
     )
     consumed = tuple(c for c, _ in slots)
     if not _hand_covers(hand, consumed):
@@ -268,7 +328,8 @@ def plan_set(
     pile-card meld must consume the taken top card itself, SPEC 06 G1 —
     canonical lowest-suit-first selection could otherwise leave it in hand).
     """
-    if not cfg.meld.allow_sets or cfg.meld.min_meld_size > 3:
+    tables = _cfg_tables(cfg)
+    if not tables.set_enabled:
         return None
     if rank in cfg.wildcard.wild_ranks:
         return None  # a set of wilds is not a set (masked while the rank is wild)
@@ -285,8 +346,7 @@ def plan_set(
         if id_rank(prefer) != rank or hand.get(prefer, 0) < 1:
             return None
         naturals.append(prefer)
-    for suit in Suit:  # canonical: lowest suit first, copies together
-        ct = card_id(rank, suit)
+    for ct in _SET_NATS[rank]:  # canonical: lowest suit first, copies together
         avail = hand.get(ct, 0) - (1 if ct == prefer else 0)
         take = min(avail, need_naturals - len(naturals))
         naturals.extend([ct] * take)
@@ -304,12 +364,9 @@ def plan_set(
             return None
         wild_ct: CardId = JOKER
     else:  # SET_WILD_TWO
-        if Rank.TWO not in cfg.wildcard.wild_ranks:
+        if not tables.two_is_wild:
             return None
-        wild_ct = next(
-            (card_id(Rank.TWO, s) for s in Suit if hand.get(card_id(Rank.TWO, s), 0) > 0),
-            -1,
-        )
+        wild_ct = next((ct for ct in _TWO_OF_SUIT if hand.get(ct, 0) > 0), -1)
         if wild_ct < 0:
             return None
 
@@ -326,11 +383,12 @@ def plan_add(
     """Extension of an existing meld by one card, SPEC 02 §2.6–2.7."""
     if hand.get(ct, 0) <= 0:
         return None
+    tables = _cfg_tables(cfg)
 
     if meld.kind is MeldKind.SET:
-        if id_rank(ct) == meld.rank and not cfg.is_wild_card(ct):
+        if id_rank(ct) == meld.rank and not tables.wild[ct]:
             return AddPlan(kind="set_append", role=SlotRole.NATURAL)
-        if cfg.is_wild_card(ct) and meld.wild_count < cfg.wildcard.wildcard_limit_per_meld:
+        if tables.wild[ct] and meld.wild_count < cfg.wildcard.wildcard_limit_per_meld:
             return AddPlan(kind="set_append", role=SlotRole.WILD)
         return None
 
@@ -338,8 +396,8 @@ def plan_add(
     suit, st = meld.suit, meld.start_pos
     en = meld.end_pos
     assert en is not None
-    low_open = pos_allowed(cfg, st - 1)
-    high_open = pos_allowed(cfg, en + 1)
+    low_open = tables.pos_ok[st - 1]
+    high_open = tables.pos_ok[en + 1]
 
     # 1. Natural end extension (includes the natural-2 landing on position 2).
     if low_open and is_natural_at(cfg, ct, st - 1, suit):
@@ -359,7 +417,7 @@ def plan_add(
         return None  # meld spans the full run; no home for the freed wild
 
     # 3. Wild placement on an open end (low end first, D12).
-    if cfg.is_wild_card(ct) and meld.wild_count < cfg.wildcard.wildcard_limit_per_meld:
+    if tables.wild[ct] and meld.wild_count < cfg.wildcard.wildcard_limit_per_meld:
         if low_open:
             return AddPlan(kind="extend", role=SlotRole.WILD, at_low=True)
         if high_open:

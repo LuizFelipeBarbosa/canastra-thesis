@@ -31,6 +31,7 @@ class TrainConfig:
     seed: int = 0
     history_len: int = 8
     trash_top_k: int = 8
+    num_workers: int = 0  # 0 = in-process collection; N = process pool of N collectors
 
     def to_dict(self) -> dict:
         return asdict(self)

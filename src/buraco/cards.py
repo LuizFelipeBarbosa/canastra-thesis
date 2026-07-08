@@ -51,17 +51,35 @@ SUIT_SYMBOLS = ("♣", "♦", "♥", "♠")
 POS_MIN = 1
 POS_MAX = 14
 
+# Hot-path tables, generated from the defining formulas at import time so the
+# contents cannot drift; lookups return the singleton enum members, avoiding a
+# per-call EnumMeta.__call__. Index 0 of position-keyed tables is unused
+# (positions are 1-based); _ID_RANK covers PAD because id_rank(PAD) is defined
+# by the modulo formula.
+_RANK_AT: tuple[Rank | None, ...] = (None,) + tuple(
+    Rank.ACE if p in (POS_MIN, POS_MAX) else Rank(p - 1) for p in range(POS_MIN, POS_MAX + 1)
+)
+_ID_RANK: tuple[Rank, ...] = tuple(Rank(ct % 13) for ct in range(54))
+_ID_SUIT: tuple[Suit, ...] = tuple(Suit(ct // 13) for ct in range(52))
+_IS_RED: tuple[bool, ...] = tuple(
+    ct != JOKER and Suit(ct // 13) in RED_SUITS for ct in range(53)
+)
+_NAT: tuple[tuple[CardId | None, ...], ...] = tuple(
+    (None,) + tuple(suit * 13 + _RANK_AT[p] for p in range(POS_MIN, POS_MAX + 1))
+    for suit in range(4)
+)
+
 
 def card_id(rank: Rank, suit: Suit) -> CardId:
     return suit * 13 + rank
 
 
 def id_rank(ct: CardId) -> Rank | None:
-    return None if ct == JOKER else Rank(ct % 13)
+    return None if ct == JOKER else _ID_RANK[ct]
 
 
 def id_suit(ct: CardId) -> Suit | None:
-    return None if ct == JOKER else Suit(ct // 13)
+    return None if ct == JOKER else _ID_SUIT[ct]
 
 
 def is_joker(ct: CardId) -> bool:
@@ -69,19 +87,21 @@ def is_joker(ct: CardId) -> bool:
 
 
 def is_red(ct: CardId) -> bool:
-    return ct != JOKER and Suit(ct // 13) in RED_SUITS
+    return _IS_RED[ct]
 
 
 def rank_at(pos: int) -> Rank:
     """Rank occupying sequence position ``pos`` (1..14)."""
     if not POS_MIN <= pos <= POS_MAX:
         raise ValueError(f"position out of range: {pos}")
-    return Rank.ACE if pos in (POS_MIN, POS_MAX) else Rank(pos - 1)
+    return _RANK_AT[pos]
 
 
 def nat(pos: int, suit: Suit) -> CardId:
     """Natural card type at sequence position ``pos`` in ``suit``."""
-    return card_id(rank_at(pos), suit)
+    if not POS_MIN <= pos <= POS_MAX:
+        raise ValueError(f"position out of range: {pos}")
+    return _NAT[suit][pos]
 
 
 def positions_of(rank: Rank) -> tuple[int, ...]:

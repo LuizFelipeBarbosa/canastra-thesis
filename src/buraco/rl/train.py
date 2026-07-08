@@ -24,16 +24,23 @@ except ImportError as exc:  # pragma: no cover
 
 import numpy as np
 
+from buraco.engine.actions import action_space_size
 from buraco.engine.serialize import config_to_dict
 from buraco.profiles import load_profile
 from buraco.rl.agent import TorchAgent
 from buraco.rl.buffer import build_batch
-from buraco.rl.checkpoint import load_checkpoint, restore_rng, save_checkpoint
+from buraco.rl.checkpoint import (
+    load_checkpoint,
+    migrate_counters,
+    restore_rng,
+    save_checkpoint,
+)
 from buraco.rl.config import TrainConfig
 from buraco.rl.evaluate import evaluate_vs
 from buraco.rl.metrics import CsvLogger
 from buraco.rl.nets import PolicyValueNet
 from buraco.rl.obs import ObsSpec
+from buraco.rl.parallel import ParallelCollector
 from buraco.rl.ppo import ppo_update
 from buraco.rl.rollout import SelfPlayCollector
 
@@ -77,7 +84,12 @@ class Trainer:
         if ckpt is not None:
             # The checkpoint defines the run (profile/players/net/seed/...);
             # only per-invocation knobs come from the CLI.
-            cfg = replace(ckpt.train_config, updates=cfg.updates, device=cfg.device)
+            cfg = replace(
+                ckpt.train_config,
+                updates=cfg.updates,
+                device=cfg.device,
+                num_workers=cfg.num_workers,
+            )
         self.cfg = cfg
         self.run_dir = run_dir
         self.device = resolve_device(cfg.device)
@@ -96,17 +108,38 @@ class Trainer:
             if ckpt is not None
             else ObsSpec.from_cfg(self.rules_cfg, cfg.history_len, cfg.trash_top_k)
         )
-        self.collector = SelfPlayCollector(
-            self.rules_cfg,
-            self.spec,
-            num_envs=cfg.num_envs,
-            seed=cfg.seed,
-            history_len=cfg.history_len,
-            trash_top_k=cfg.trash_top_k,
-        )
+        if cfg.num_workers > 0 and (
+            cfg.num_envs < cfg.num_workers or cfg.num_envs % cfg.num_workers
+        ):
+            raise SystemExit(
+                f"num_envs ({cfg.num_envs}) must be a positive multiple of "
+                f"--num-workers ({cfg.num_workers}); pick a compatible worker count"
+            )
+        if cfg.num_workers > 0:
+            self.collector: SelfPlayCollector | ParallelCollector = ParallelCollector(
+                self.rules_cfg,
+                self.spec,
+                num_envs=cfg.num_envs,
+                seed=cfg.seed,
+                num_workers=cfg.num_workers,
+                num_actions=action_space_size(self.rules_cfg.meld.max_meld_slots),
+                hidden=cfg.hidden,
+                layers=cfg.layers,
+                history_len=cfg.history_len,
+                trash_top_k=cfg.trash_top_k,
+            )
+        else:
+            self.collector = SelfPlayCollector(
+                self.rules_cfg,
+                self.spec,
+                num_envs=cfg.num_envs,
+                seed=cfg.seed,
+                history_len=cfg.history_len,
+                trash_top_k=cfg.trash_top_k,
+            )
         self.net = PolicyValueNet(
             self.spec.flat_dim,
-            self.collector.envs[0].num_actions,
+            self.collector.num_actions,
             hidden=cfg.hidden,
             layers=cfg.layers,
         ).to(self.device)
@@ -121,7 +154,14 @@ class Trainer:
             self.start_update = ckpt.update + 1
             self.global_env_steps = ckpt.global_env_steps
             self.global_episodes = ckpt.global_episodes
-            self.collector.episode_counter = restore_rng(ckpt.rng)
+            restore_rng(ckpt.rng)
+            counters = migrate_counters(ckpt.rng, cfg.num_workers)
+            if isinstance(self.collector, ParallelCollector):
+                assert isinstance(counters, list)
+                self.collector.counters = counters
+            else:
+                assert isinstance(counters, int)
+                self.collector.episode_counter = counters
 
         (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         (run_dir / "config.json").write_text(
@@ -220,8 +260,20 @@ class Trainer:
             self.spec,
             self.collector.episode_counter,
         )
-        save_checkpoint(self.run_dir / "checkpoints" / f"ckpt_{update:06d}.pt", *args)
-        save_checkpoint(self.run_dir / "checkpoints" / "latest.pt", *args)
+        counters = getattr(self.collector, "counters", None)
+        save_checkpoint(
+            self.run_dir / "checkpoints" / f"ckpt_{update:06d}.pt",
+            *args,
+            episode_counters=counters,
+        )
+        save_checkpoint(
+            self.run_dir / "checkpoints" / "latest.pt", *args, episode_counters=counters
+        )
+
+    def close(self) -> None:
+        close = getattr(self.collector, "close", None)
+        if close is not None:
+            close()
 
 
 def resolve_run_dir(run_dir: str | None, resume: Path | None, cfg: TrainConfig) -> Path:
@@ -249,6 +301,7 @@ def main() -> None:
     parser.add_argument("--eval-games", type=int, default=defaults.eval_games)
     parser.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
     parser.add_argument("--device", default=defaults.device)
+    parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--resume", default=None)
@@ -267,11 +320,16 @@ def main() -> None:
         eval_games=args.eval_games,
         checkpoint_every=args.checkpoint_every,
         device=args.device,
+        num_workers=args.num_workers,
         seed=args.seed,
     )
     resume = Path(args.resume) if args.resume else None
     run_dir = resolve_run_dir(args.run_dir, resume, cfg)
-    Trainer(cfg, run_dir, resume=resume).run()
+    trainer = Trainer(cfg, run_dir, resume=resume)
+    try:
+        trainer.run()
+    finally:
+        trainer.close()
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from buraco.cards import Rank
+from buraco.cards import JOKER, Rank, id_rank, rank_name
 
 # --- policy constants -------------------------------------------------------
 
@@ -192,15 +192,24 @@ class RulesConfig:
 
     def card_value(self, ct: int) -> int:
         """Point value of a card type under this profile's scoring table."""
-        from buraco.cards import rank_name
-
-        return self.scoring.card_points[rank_name(ct)]
+        table = self.__dict__.get("_card_values")
+        if table is None:
+            # Memoized per instance (the tree is frozen); lookups bypass the
+            # per-call rank_name/dict chain. object.__setattr__ is the frozen-
+            # dataclass escape hatch; fields/__eq__/asdict are unaffected.
+            table = tuple(self.scoring.card_points[rank_name(c)] for c in range(54))
+            object.__setattr__(self, "_card_values", table)
+        return table[ct]
 
     def is_wild_card(self, ct: int) -> bool:
         """Whether ``ct`` is a wildcard type (context-free; the natural-2
         positional exception is applied by meld validation, not here)."""
-        from buraco.cards import JOKER, id_rank
-
-        if ct == JOKER:
-            return self.wildcard.jokers_wild
-        return id_rank(ct) in self.wildcard.wild_ranks
+        table = self.__dict__.get("_wild_table")
+        if table is None:
+            table = tuple(
+                self.wildcard.jokers_wild if c == JOKER
+                else id_rank(c) in self.wildcard.wild_ranks
+                for c in range(54)
+            )
+            object.__setattr__(self, "_wild_table", table)
+        return table[ct]

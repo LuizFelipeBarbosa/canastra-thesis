@@ -10,6 +10,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from multiprocessing import Pool
@@ -22,13 +23,14 @@ from buraco.profiles import load_profile
 _WORKER = {}
 
 
-def _init_worker(profile: str, players: int, agent_kind: str) -> None:
+def _init_worker(profile: str, players: int, agent_kind: str, record_masks: bool = False) -> None:
     from buraco.agents.heuristic_agent import HeuristicAgent
     from buraco.agents.random_agent import RandomAgent
 
     cfg = load_profile(profile, num_players=players)
     _WORKER["cfg"] = cfg
     _WORKER["env"] = BuracoEnv(cfg)
+    _WORKER["record_masks"] = record_masks
     _WORKER["make_agents"] = lambda seed: [
         HeuristicAgent(seed + p) if agent_kind == "heuristic" else RandomAgent(seed + p)
         for p in range(cfg.table.num_players)
@@ -38,16 +40,22 @@ def _init_worker(profile: str, players: int, agent_kind: str) -> None:
 def _play(seed: int) -> dict:
     env: BuracoEnv = _WORKER["env"]
     agents = _WORKER["make_agents"](seed)
+    digest = hashlib.sha256() if _WORKER.get("record_masks") else None
     obs, info = env.reset(seed=seed)
+    if digest is not None:
+        digest.update(info["action_mask"].tobytes())
     terminated = truncated = False
     steps = 0
     while not (terminated or truncated):
         seat = info["to_play"]
         action = agents[seat].act(env.observe_raw(seat), info["legal_actions"], env.cfg)
         obs, _, terminated, truncated, info = env.step(action)
+        if digest is not None:
+            digest.update(info["action_mask"].tobytes())
         steps += 1
     state = env.state
     return {
+        "mask_digest": digest.hexdigest() if digest is not None else None,
         "seed": seed,
         "steps": steps,
         "terminated": terminated,
@@ -69,6 +77,8 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--save-logs", default=None, help="write JSONL replay logs here")
     parser.add_argument("--replay", default=None, help="verify a JSONL log file re-plays")
+    parser.add_argument("--mask-digests", default=None,
+                        help="write per-game sha256 action-mask digests (JSONL) here")
     args = parser.parse_args()
 
     if args.replay:
@@ -77,7 +87,8 @@ def main() -> None:
 
     start = time.perf_counter()
     with Pool(args.workers, initializer=_init_worker,
-              initargs=(args.profile, args.players, args.agents)) as pool:
+              initargs=(args.profile, args.players, args.agents,
+                        args.mask_digests is not None)) as pool:
         results = pool.map(_play, range(args.games), chunksize=16)
     elapsed = time.perf_counter() - start
 
@@ -105,6 +116,16 @@ def main() -> None:
                     "state_hash": r["state_hash"],
                 }) + "\n")
         print(f"wrote {len(results)} replayable logs to {args.save_logs}")
+
+    if args.mask_digests:
+        with open(args.mask_digests, "w") as fh:
+            for r in results:
+                fh.write(json.dumps({
+                    "profile": args.profile, "players": args.players,
+                    "seed": r["seed"], "steps": r["steps"],
+                    "state_hash": r["state_hash"], "mask_digest": r["mask_digest"],
+                }) + "\n")
+        print(f"wrote {len(results)} mask digests to {args.mask_digests}")
 
 
 def verify_logs(path: str) -> None:

@@ -59,6 +59,73 @@ def test_smoke_train_and_resume(tmp_path):
     assert int(rows[2]["global_env_steps"]) > int(rows[1]["global_env_steps"])
 
 
+def test_smoke_train_parallel_and_resume(tmp_path):
+    """num_workers=2: trains, checkpoints per-slot counters, resumes them."""
+    run_dir = tmp_path / "run-mp"
+    cfg = TrainConfig(**{**TINY.to_dict(), "num_workers": 2})
+    trainer = Trainer(cfg, run_dir)
+    try:
+        trainer.run()
+    finally:
+        trainer.close()
+    rows = _rows(run_dir / "metrics.csv")
+    assert len(rows) == 2
+    for row in rows:
+        float(row["loss_pi"])
+
+    # Same worker count: per-slot counters pass through the checkpoint intact.
+    resumed = Trainer(
+        TrainConfig(**{**cfg.to_dict(), "updates": 3}),
+        run_dir,
+        resume=run_dir / "checkpoints" / "latest.pt",
+    )
+    try:
+        assert len(resumed.collector.counters) == 2
+        assert all(c % 2 == slot for slot, c in enumerate(resumed.collector.counters))
+        resumed.run()
+    finally:
+        resumed.close()
+    assert [int(r["update"]) for r in _rows(run_dir / "metrics.csv")] == [0, 1, 2]
+
+
+def test_trainer_refuses_indivisible_worker_env_split(tmp_path):
+    """The refusal happens before any pool spawns or files are written."""
+    bad = TrainConfig(**{**TINY.to_dict(), "num_envs": 3, "num_workers": 2})
+    with pytest.raises(SystemExit, match="multiple of"):
+        Trainer(bad, tmp_path / "run-bad")
+    assert not (tmp_path / "run-bad").exists()
+
+
+def test_resume_across_worker_counts(tmp_path):
+    """Serial checkpoints resume into a pool and back without seed reuse."""
+    run_dir = tmp_path / "run-serial"
+    Trainer(TINY, run_dir).run()  # legacy-style checkpoint: scalar counter only
+    latest = run_dir / "checkpoints" / "latest.pt"
+
+    to_parallel = Trainer(
+        TrainConfig(**{**TINY.to_dict(), "updates": 3, "num_workers": 2}),
+        run_dir,
+        resume=latest,
+    )
+    try:
+        high = max(to_parallel.collector.counters)
+        assert all(c % 2 == slot for slot, c in enumerate(to_parallel.collector.counters))
+        to_parallel.run()
+        assert max(to_parallel.collector.counters) > high
+    finally:
+        to_parallel.close()
+
+    # Parallel checkpoint back to serial: resume at the high-water mark.
+    back = Trainer(
+        TrainConfig(**{**TINY.to_dict(), "updates": 4}),
+        run_dir,
+        resume=latest,
+    )
+    assert isinstance(back.collector.episode_counter, int)
+    back.run()
+    assert [int(r["update"]) for r in _rows(run_dir / "metrics.csv")] == [0, 1, 2, 3]
+
+
 def test_resume_infers_run_config_from_checkpoint(tmp_path):
     """--resume must not require repeating --profile/--players (Codex review P2)."""
     run_dir = tmp_path / "run4p"

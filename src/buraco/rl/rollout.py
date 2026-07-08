@@ -46,6 +46,7 @@ class SelfPlayCollector:
         seed: int,
         history_len: int = 8,
         trash_top_k: int = 8,
+        counter_stride: int = 1,
     ) -> None:
         self.cfg = cfg
         self.spec = spec
@@ -56,12 +57,19 @@ class SelfPlayCollector:
         self.num_players = cfg.table.num_players
         # Monotone counter: every training episode is replayable from
         # (rules_config, seed, action_log). Persisted in checkpoints.
+        # A parallel pool gives each worker slot w the stride-W residue class
+        # starting at w, so seed streams stay disjoint (see rl/parallel.py).
         self.episode_counter = 0
+        self.counter_stride = counter_stride
         self._seed_base = seed * 1_000_000
+
+    @property
+    def num_actions(self) -> int:
+        return self.envs[0].num_actions
 
     def next_seed(self) -> int:
         seed = self._seed_base + self.episode_counter
-        self.episode_counter += 1
+        self.episode_counter += self.counter_stride
         return seed
 
     def collect(

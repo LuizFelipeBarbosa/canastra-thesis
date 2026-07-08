@@ -41,7 +41,19 @@ def save_checkpoint(
     rules_cfg: RulesConfig,
     obs_spec: ObsSpec,
     episode_counter: int,
+    *,
+    episode_counters: list[int] | None = None,
 ) -> None:
+    # The legacy scalar "episode_counter" is always written so older readers
+    # keep working; a parallel pool additionally records its per-slot counters.
+    rng: dict[str, Any] = {
+        "python": random.getstate(),
+        "torch_cpu": torch.get_rng_state(),
+        "episode_counter": episode_counter,
+    }
+    if episode_counters is not None:
+        rng["episode_counters"] = list(episode_counters)
+        rng["num_workers"] = len(episode_counters)
     payload = {
         "model": net.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -51,11 +63,7 @@ def save_checkpoint(
         "train_config": train_cfg.to_dict(),
         "rules_config": config_to_dict(rules_cfg),
         "obs_spec": obs_spec.to_dict(),
-        "rng": {
-            "python": random.getstate(),
-            "torch_cpu": torch.get_rng_state(),
-            "episode_counter": episode_counter,
-        },
+        "rng": rng,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, tmp)
@@ -82,3 +90,21 @@ def restore_rng(rng: dict[str, Any]) -> int:
     random.setstate(rng["python"])
     torch.set_rng_state(rng["torch_cpu"])
     return int(rng["episode_counter"])
+
+
+def migrate_counters(rng: dict[str, Any], num_workers: int) -> int | list[int]:
+    """Episode counters for the next run segment, from a checkpoint rng dict.
+
+    Counters are post-increment (they name the next unconsumed seed index), and
+    a W-pool keeps slot w in residue class w (mod W). Same worker count →
+    counters pass through untouched. Any other migration restarts every slot at
+    the smallest index ≥ the checkpoint's high-water mark in its residue class,
+    so no episode seed is ever reused.
+    """
+    counters = rng.get("episode_counters")
+    if num_workers <= 0:
+        return max(counters) if counters else int(rng["episode_counter"])
+    if counters is not None and len(counters) == num_workers:
+        return list(counters)
+    high = max(counters) if counters else int(rng["episode_counter"])
+    return [high + ((w - high) % num_workers) for w in range(num_workers)]

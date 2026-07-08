@@ -487,14 +487,15 @@ def legal_actions(state: RoundState) -> list[Action]:
                     if plan_set(cfg, hand, rank, wild) is not None:
                         actions.append(CreateSet(rank=rank, wild=wild))
 
+    sorted_hand = sorted(hand)  # enumeration never mutates the hand
     for slot, meld in enumerate(side_melds):
-        for ct in sorted(hand):
+        for ct in sorted_hand:
             if plan_add(cfg, hand, meld, ct) is not None and add_result_allowed(
                 state, side, meld, ct
             ):
                 actions.append(Add(slot=slot, ct=ct))
 
-    for ct in sorted(hand):
+    for ct in sorted_hand:
         if discard_allowed(state, ct):
             actions.append(Discard(ct=ct))
 
