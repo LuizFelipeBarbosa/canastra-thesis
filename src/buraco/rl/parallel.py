@@ -24,7 +24,7 @@ import torch
 from buraco.config import RulesConfig
 from buraco.engine.serialize import config_from_dict, config_to_dict
 from buraco.rl.buffer import SeatTrajectory
-from buraco.rl.nets import PolicyValueNet
+from buraco.rl.nets import build_net
 from buraco.rl.obs import ObsSpec
 from buraco.rl.pool import OpponentMixture
 from buraco.rl.rollout import RolloutStats, SelfPlayCollector
@@ -35,7 +35,7 @@ _WORKER: dict[str, Any] = {}
 def _init_worker(
     rules_dict: dict,
     spec_dict: dict,
-    net_dims: tuple[int, int, int, int],
+    net_config: dict,
     envs_per_worker: int,
     seed: int,
     stride: int,
@@ -47,7 +47,6 @@ def _init_worker(
     torch.set_num_threads(1)  # W single-threaded workers; no oversubscription
     cfg = config_from_dict(rules_dict)
     spec = ObsSpec.from_dict(spec_dict)
-    flat_dim, num_actions, hidden, layers = net_dims
     _WORKER["collector"] = SelfPlayCollector(
         cfg,
         spec,
@@ -58,7 +57,7 @@ def _init_worker(
         counter_stride=stride,
         mixture=OpponentMixture(p_heuristic, p_pool),
     )
-    _WORKER["net"] = PolicyValueNet(flat_dim, num_actions, hidden=hidden, layers=layers)
+    _WORKER["net"] = build_net(net_config)
     _WORKER["seed"] = seed
 
 
@@ -70,7 +69,7 @@ def _collect_task(
     pool_manifest: list[str],
 ) -> tuple[int, list[SeatTrajectory], RolloutStats, int]:
     collector: SelfPlayCollector = _WORKER["collector"]
-    net: PolicyValueNet = _WORKER["net"]
+    net: torch.nn.Module = _WORKER["net"]
     net.load_state_dict(state_dict)
     # Frozen pool members load lazily and stay cached across tasks; the
     # manifest broadcast evicts members no longer referenced.
@@ -95,9 +94,7 @@ class ParallelCollector:
         num_envs: int,
         seed: int,
         num_workers: int,
-        num_actions: int,
-        hidden: int,
-        layers: int,
+        net_config: dict,
         history_len: int = 8,
         trash_top_k: int = 8,
         p_heuristic: float = 0.0,
@@ -116,7 +113,7 @@ class ParallelCollector:
         self.cfg = cfg
         self.num_players = cfg.table.num_players
         self.num_workers = num_workers
-        self.num_actions = num_actions
+        self.num_actions = net_config["num_actions"]
         self._pool_manifest: list[str] = []
         # Slot w owns residue class w (mod W) of the episode-seed counter.
         self.counters = list(range(num_workers))
@@ -127,7 +124,7 @@ class ParallelCollector:
             initargs=(
                 config_to_dict(cfg),
                 spec.to_dict(),
-                (spec.flat_dim, num_actions, hidden, layers),
+                net_config,
                 num_envs // num_workers,
                 seed,
                 num_workers,
@@ -148,7 +145,7 @@ class ParallelCollector:
         self._pool_manifest = list(paths)
 
     def collect(
-        self, net: PolicyValueNet, device: torch.device, min_steps: int
+        self, net: torch.nn.Module, device: torch.device, min_steps: int
     ) -> tuple[list[SeatTrajectory], RolloutStats]:
         assert self._executor is not None, "collector is closed"
         start = time.perf_counter()

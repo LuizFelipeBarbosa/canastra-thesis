@@ -24,6 +24,8 @@ class TrainConfig:
     target_kl: float | None = 0.03
     hidden: int = 512
     layers: int = 2
+    arch: str = "mlp"  # "mlp" (flat baseline) or "structured" (card embeddings)
+    embed_dim: int = 64  # structured arch only: card-embedding width
     eval_every: int = 20
     eval_games: int = 100
     checkpoint_every: int = 20
@@ -38,7 +40,11 @@ class TrainConfig:
     opp_heuristic: float = 0.0  # scripted HeuristicAgent opponents
     opp_pool: float = 0.0  # frozen past-checkpoint opponents
     pool_every: int = 500  # snapshot cadence (updates) for the opponent pool
-    pool_size: int = 10  # max pool members kept; oldest evicted
+    pool_size: int = 10  # max pool members kept
+    # "recent": evict oldest (V2a behavior; measured late-run decline as the
+    # pool filled with similar recent selves). "spaced": keep the oldest and
+    # newest, evict interior members toward log-spaced coverage of the run.
+    pool_retention: str = "recent"
 
     def to_dict(self) -> dict:
         return asdict(self)

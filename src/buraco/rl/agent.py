@@ -11,14 +11,14 @@ import torch
 
 from buraco.config import RulesConfig
 from buraco.env.encoding import encode_observation
-from buraco.rl.nets import PolicyValueNet, masked_dist
+from buraco.rl.nets import masked_dist
 from buraco.rl.obs import ObsSpec
 
 
 class TorchAgent:
     def __init__(
         self,
-        net: PolicyValueNet,
+        net: torch.nn.Module,
         spec: ObsSpec,
         device: str = "cpu",
         greedy: bool = True,
@@ -59,14 +59,19 @@ class TorchAgent:
         seed: int | None = None,
     ) -> TorchAgent:
         from buraco.rl.checkpoint import load_checkpoint
+        from buraco.rl.nets import build_net, net_config
 
         ckpt = load_checkpoint(Path(path), map_location=device)
-        train_cfg = ckpt.train_config
-        net = PolicyValueNet(
-            ckpt.obs_spec.flat_dim,
-            ckpt.model["policy_head.weight"].shape[0],
-            hidden=train_cfg.hidden,
-            layers=train_cfg.layers,
+        train_cfg = ckpt.train_config  # from_dict defaults arch="mlp" for old files
+        net = build_net(
+            net_config(
+                train_cfg.arch,
+                ckpt.obs_spec,
+                ckpt.model["policy_head.weight"].shape[0],
+                train_cfg.hidden,
+                train_cfg.layers,
+                embed_dim=train_cfg.embed_dim,
+            )
         )
         net.load_state_dict(ckpt.model)
         return cls(

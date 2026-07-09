@@ -11,11 +11,15 @@ import numpy as np  # noqa: E402
 from buraco.profiles import load_profile  # noqa: E402
 from buraco.rl.buffer import build_batch  # noqa: E402
 from buraco.rl.checkpoint import migrate_counters  # noqa: E402
-from buraco.rl.nets import PolicyValueNet  # noqa: E402
+from buraco.rl.nets import PolicyValueNet, net_config  # noqa: E402
 from buraco.rl.obs import ObsSpec  # noqa: E402
 from buraco.rl.parallel import ParallelCollector  # noqa: E402
 
 WORKERS = 2
+
+
+def _net_config(spec):
+    return net_config("mlp", spec, 1585, hidden=32, layers=1)
 
 
 @pytest.fixture(scope="module")
@@ -25,7 +29,7 @@ def pool():
     spec = ObsSpec.from_cfg(cfg)
     collector = ParallelCollector(
         cfg, spec, num_envs=4, seed=0, num_workers=WORKERS,
-        num_actions=1585, hidden=32, layers=1,
+        net_config=_net_config(spec),
     )
     net = PolicyValueNet(spec.flat_dim, 1585, hidden=32, layers=1)
     yield collector, net
@@ -84,7 +88,7 @@ def test_double_close_is_safe():
     spec = ObsSpec.from_cfg(cfg)
     collector = ParallelCollector(
         cfg, spec, num_envs=2, seed=1, num_workers=1,
-        num_actions=1585, hidden=32, layers=1,
+        net_config=_net_config(spec),
     )
     collector.close()
     collector.close()
@@ -103,11 +107,11 @@ def test_rejects_env_topology_that_would_be_silently_rounded():
     # Non-divisible: 17 envs over 4 workers would silently run 16.
     with pytest.raises(ValueError, match="multiple of"):
         ParallelCollector(cfg, spec, num_envs=17, seed=0, num_workers=4,
-                          num_actions=1585, hidden=32, layers=1)
+                          net_config=_net_config(spec))
     # More workers than envs: 2 envs over 8 workers would silently run 8.
     with pytest.raises(ValueError, match="multiple of"):
         ParallelCollector(cfg, spec, num_envs=2, seed=0, num_workers=8,
-                          num_actions=1585, hidden=32, layers=1)
+                          net_config=_net_config(spec))
 
 
 def test_migrate_counters_rules():

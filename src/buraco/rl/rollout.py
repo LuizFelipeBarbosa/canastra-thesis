@@ -25,7 +25,7 @@ import torch
 from buraco.config import RulesConfig
 from buraco.env.env import BuracoEnv
 from buraco.rl.buffer import SeatTrajectory
-from buraco.rl.nets import PolicyValueNet, masked_dist
+from buraco.rl.nets import masked_dist
 from buraco.rl.obs import ObsSpec
 from buraco.rl.pool import EpisodeOpponents, OpponentMixture
 
@@ -99,7 +99,7 @@ class SelfPlayCollector:
         return obs, info, trajs, assign
 
     def collect(
-        self, net: PolicyValueNet, device: torch.device, min_steps: int
+        self, net: torch.nn.Module, device: torch.device, min_steps: int
     ) -> tuple[list[SeatTrajectory], RolloutStats]:
         start = time.perf_counter()
         done_trajs: list[SeatTrajectory] = []

@@ -12,7 +12,7 @@ from buraco.profiles import load_profile  # noqa: E402
 from buraco.rl.buffer import build_batch  # noqa: E402
 from buraco.rl.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from buraco.rl.config import TrainConfig  # noqa: E402
-from buraco.rl.nets import PolicyValueNet  # noqa: E402
+from buraco.rl.nets import PolicyValueNet, net_config  # noqa: E402
 from buraco.rl.obs import ObsSpec  # noqa: E402
 from buraco.rl.parallel import ParallelCollector  # noqa: E402
 from buraco.rl.pool import (  # noqa: E402
@@ -196,7 +196,7 @@ def test_parallel_collector_with_mixture(tmp_path):
 
     collector = ParallelCollector(
         cfg, spec, num_envs=2, seed=0, num_workers=1,
-        num_actions=NUM_ACTIONS, hidden=32, layers=1,
+        net_config=net_config("mlp", spec, NUM_ACTIONS, hidden=32, layers=1),
         p_heuristic=0.5, p_pool=0.5,
     )
     try:

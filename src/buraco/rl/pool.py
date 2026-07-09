@@ -26,30 +26,38 @@ import torch
 
 from buraco.agents.heuristic_agent import HeuristicAgent
 from buraco.config import RulesConfig
-from buraco.rl.nets import PolicyValueNet
+from buraco.rl.nets import PolicyValueNet, build_net
 
 # Entropy word mixed into per-episode seeds so opponent assignment draws come
 # from a stream disjoint from anything else derived from the episode seed.
 _ASSIGN_STREAM = 0x0FF0
 
 
-def save_pool_member(path: Path, net: torch.nn.Module) -> None:
-    """Atomic write of a bare CPU state dict; dims are recovered from shapes."""
+def save_pool_member(
+    path: Path, net: torch.nn.Module, net_config: dict | None = None
+) -> None:
+    """Atomic write of a CPU state dict plus the build_net recipe."""
     state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
     tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save({"model": state}, tmp)
+    torch.save({"model": state, "config": net_config}, tmp)
     os.replace(tmp, path)
 
 
-def load_pool_member(path: Path | str) -> PolicyValueNet:
-    state = torch.load(path, map_location="cpu", weights_only=True)["model"]
-    hidden, flat_dim = state["trunk.0.weight"].shape
-    num_actions = state["policy_head.weight"].shape[0]
-    layers = sum(
-        1 for k, v in state.items()
-        if k.startswith("trunk.") and k.endswith(".weight") and v.dim() == 2
-    )
-    net = PolicyValueNet(flat_dim, num_actions, hidden=hidden, layers=layers)
+def load_pool_member(path: Path | str) -> torch.nn.Module:
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    state = payload["model"]
+    config = payload.get("config")
+    if config is not None:
+        net = build_net(config)
+    else:
+        # V2a-era file: bare MLP state dict, dims recovered from shapes.
+        hidden, flat_dim = state["trunk.0.weight"].shape
+        num_actions = state["policy_head.weight"].shape[0]
+        layers = sum(
+            1 for k, v in state.items()
+            if k.startswith("trunk.") and k.endswith(".weight") and v.dim() == 2
+        )
+        net = PolicyValueNet(flat_dim, num_actions, hidden=hidden, layers=layers)
     net.load_state_dict(state)
     return net.eval()
 
@@ -136,10 +144,21 @@ class PoolManager:
     being moved wholesale (names, not absolute paths, are the durable record).
     """
 
-    def __init__(self, pool_dir: Path, size: int, every: int):
+    def __init__(
+        self,
+        pool_dir: Path,
+        size: int,
+        every: int,
+        net_config: dict | None = None,
+        retention: str = "recent",
+    ):
+        if retention not in ("recent", "spaced"):
+            raise ValueError(f"unknown pool retention {retention!r}")
         self.dir = pool_dir
         self.size = size
         self.every = every
+        self.net_config = net_config
+        self.retention = retention
         self.names: list[str] = []
         self._pending_unlink: list[str] = []
 
@@ -165,13 +184,27 @@ class PoolManager:
     def snapshot(self, update: int, net: torch.nn.Module) -> None:
         name = f"pool_{update:06d}.pt"
         self.dir.mkdir(parents=True, exist_ok=True)
-        save_pool_member(self.dir / name, net)
+        save_pool_member(self.dir / name, net, self.net_config)
         if name not in self.names:  # resume can revisit its snapshot update
             self.names.append(name)
         while len(self.names) > self.size:
             # Deferred: the file may still be referenced by the newest on-disk
             # checkpoint until the next one persists the shrunk manifest.
-            self._pending_unlink.append(self.names.pop(0))
+            self._pending_unlink.append(self.names.pop(self._evict_index()))
+
+    def _evict_index(self) -> int:
+        """"recent" evicts the oldest. "spaced" protects the oldest anchor and
+        the newest member and evicts the interior member whose removal leaves
+        the smallest merged update gap, converging on log-spaced coverage —
+        the V2a run declined late as newest-K retention filled the pool with
+        similar recent selves."""
+        if self.retention == "recent" or len(self.names) <= 2:
+            return 0
+        updates = [int(n.removeprefix("pool_").removesuffix(".pt")) for n in self.names]
+        return min(
+            range(1, len(updates) - 1),
+            key=lambda i: updates[i + 1] - updates[i - 1],
+        )
 
     def flush_evictions(self) -> None:
         """Unlink evicted members; call only after a checkpoint has been saved

@@ -49,7 +49,7 @@ from buraco.rl.checkpoint import (
 from buraco.rl.config import TrainConfig
 from buraco.rl.evaluate import evaluate_vs
 from buraco.rl.metrics import CsvLogger
-from buraco.rl.nets import PolicyValueNet
+from buraco.rl.nets import build_net, net_config
 from buraco.rl.obs import ObsSpec
 from buraco.rl.parallel import ParallelCollector
 from buraco.rl.pool import OpponentMixture, PoolManager
@@ -144,6 +144,17 @@ class Trainer:
                 f"num_envs ({cfg.num_envs}) must be a positive multiple of "
                 f"--num-workers ({cfg.num_workers}); pick a compatible worker count"
             )
+        try:
+            self.net_config = net_config(
+                cfg.arch,
+                self.spec,
+                action_space_size(self.rules_cfg.meld.max_meld_slots),
+                cfg.hidden,
+                cfg.layers,
+                embed_dim=cfg.embed_dim,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         if cfg.num_workers > 0:
             self.collector: SelfPlayCollector | ParallelCollector = ParallelCollector(
                 self.rules_cfg,
@@ -151,9 +162,7 @@ class Trainer:
                 num_envs=cfg.num_envs,
                 seed=cfg.seed,
                 num_workers=cfg.num_workers,
-                num_actions=action_space_size(self.rules_cfg.meld.max_meld_slots),
-                hidden=cfg.hidden,
-                layers=cfg.layers,
+                net_config=self.net_config,
                 history_len=cfg.history_len,
                 trash_top_k=cfg.trash_top_k,
                 p_heuristic=cfg.opp_heuristic,
@@ -169,12 +178,7 @@ class Trainer:
                 trash_top_k=cfg.trash_top_k,
                 mixture=self.mixture,
             )
-        self.net = PolicyValueNet(
-            self.spec.flat_dim,
-            self.collector.num_actions,
-            hidden=cfg.hidden,
-            layers=cfg.layers,
-        ).to(self.device)
+        self.net = build_net(self.net_config).to(self.device)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
 
         self.start_update = 0
@@ -195,11 +199,20 @@ class Trainer:
                 assert isinstance(counters, int)
                 self.collector.episode_counter = counters
 
-        self.pool = (
-            PoolManager(run_dir / "pool", cfg.pool_size, cfg.pool_every)
-            if cfg.opp_pool > 0
-            else None
-        )
+        try:
+            self.pool = (
+                PoolManager(
+                    run_dir / "pool",
+                    cfg.pool_size,
+                    cfg.pool_every,
+                    net_config=self.net_config,
+                    retention=cfg.pool_retention,
+                )
+                if cfg.opp_pool > 0
+                else None
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         if self.pool is not None:
             if ckpt is not None and ckpt.pool_manifest:
                 self.pool.restore(ckpt.pool_manifest)
@@ -360,6 +373,8 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=defaults.lr)
     parser.add_argument("--hidden", type=int, default=defaults.hidden)
     parser.add_argument("--layers", type=int, default=defaults.layers)
+    parser.add_argument("--arch", choices=("mlp", "structured"), default=defaults.arch)
+    parser.add_argument("--embed-dim", type=int, default=defaults.embed_dim)
     parser.add_argument("--eval-every", type=int, default=defaults.eval_every)
     parser.add_argument("--eval-games", type=int, default=defaults.eval_games)
     parser.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
@@ -374,6 +389,9 @@ def main() -> None:
     parser.add_argument("--opp-pool", type=float, default=None)
     parser.add_argument("--pool-every", type=int, default=None)
     parser.add_argument("--pool-size", type=int, default=None)
+    parser.add_argument(
+        "--pool-retention", choices=("recent", "spaced"), default=None
+    )
     args = parser.parse_args()
 
     resume_overrides = {
@@ -384,6 +402,7 @@ def main() -> None:
             ("opp_pool", args.opp_pool),
             ("pool_every", args.pool_every),
             ("pool_size", args.pool_size),
+            ("pool_retention", args.pool_retention),
         )
         if value is not None
     }
@@ -396,6 +415,8 @@ def main() -> None:
         lr=args.lr,
         hidden=args.hidden,
         layers=args.layers,
+        arch=args.arch,
+        embed_dim=args.embed_dim,
         eval_every=args.eval_every,
         eval_games=args.eval_games,
         checkpoint_every=args.checkpoint_every,
